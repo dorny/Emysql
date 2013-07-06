@@ -1,5 +1,5 @@
 LIBDIR=$(shell erl -eval 'io:format("~s~n", [code:lib_dir()])' -s init stop -noshell)
-VERSION=0.2
+VERSION=0.3.0
 PKGNAME=emysql
 APP_NAME=emysql
 CRYPTO_PATH=/opt/local/var/macports/software/erlang/R14A_0/opt/local/lib/erlang/lib/crypto-2.0/ebin/
@@ -64,7 +64,7 @@ package: clean
 install:
 	@for i in ebin/*.beam ebin/*.app include/*.hrl src/*.erl; do install -m 644 -D $$i $(prefix)/$(LIBDIR)/$(PKGNAME)-$(VERSION)/$$i ; done
 
-all-test: test encoding-test test20
+all-test: test encoding-test test20 testutil
 
 encoding-test: all
 	(cd test; ct_run -suite latin_SUITE utf8_SUITE utf8_to_latindb_SUITE latin_to_utf8db_SUITE -pa ../ebin $(CRYPTO_PATH))
@@ -78,6 +78,18 @@ test20: all
 test9: all
 	(cd test; ct_run -suite con_mgr_SUITE -pa ../ebin $(CRYPTO_PATH))
 
+testutil: all
+	(cd test; ct_run -suite as_record_SUITE -cover as_record.cover -pa ../ebin $(CRYPTO_PATH))
+
 prove: all
 	(cd t;$(MAKE))
 	prove t/*.t
+
+APPS = kernel stdlib erts crypto public_key ssl compiler asn1
+REPO = emysql
+COMBO_PLT = $(HOME)/.$(REPO)_combo_dialyzer_plt
+build_plt:
+	dialyzer --build_plt --output_plt $(COMBO_PLT) --apps $(APPS)
+
+dialyzer:
+	dialyzer --fullpath -nn --plt $(COMBO_PLT) ebin

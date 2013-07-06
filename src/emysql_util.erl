@@ -1,6 +1,7 @@
 %% Copyright (c) 2009
 %% Bill Warnecke <bill@rupture.com>
 %% Jacob Vorreuter <jacob.vorreuter@gmail.com>
+%% Mike Oxford <moxford@gmail.com>
 %%
 %% Permission is hereby granted, free of charge, to any person
 %% obtaining a copy of this software and associated documentation
@@ -23,15 +24,57 @@
 %% FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 %% OTHER DEALINGS IN THE SOFTWARE.
 -module(emysql_util).
--export([field_names/1, as_record/4, as_record/3, as_json/1, length_coded_binary/1, length_coded_string/1,
-    null_terminated_string/2, asciz/1, bxor_binary/2, dualmap/3, hash/1,
-    rnd/3, encode/1, encode/2, quote/1]).
--compile(export_all).
+-export([field_names/1, as_record/4, as_record/3, length_coded_binary/1, length_coded_string/1,
+    null_terminated_string/2, asciz/1, bxor_binary/2, dualmap/3, hash/1, to_binary/1,
+    rnd/3, encode/1, encode/2, quote/1, as_proplist/1, as_dict/1, as_json/1]).
 
 -include("emysql.hrl").
 
 field_names(Result) when is_record(Result, result_packet) ->
     [Field#field.name || Field <- Result#result_packet.field_list].
+
+%% @spec as_dict(Result) -> dict
+%%      Result = #result_packet{}
+%%
+%% @doc package row data as a dict
+%%
+%% -module(fetch_example).
+%%
+%% fetch_foo() ->
+%%  Res = emysql:execute(pool1, "select * from foo"),
+%%  Res:as_dict(Res).
+as_dict(Res = #result_packet{}) ->
+    dict:from_list(as_proplist(Res)).
+ 
+%% @spec as_proplist(Result) -> proplist
+%%      Result = #result_packet{}
+%%
+%% @doc package row data as a proplist
+%%
+%% -module(fetch_example).
+%%
+%% fetch_foo() ->
+%%  Res = emysql:execute(pool1, "select * from foo"),
+%%  Res:as_proplist(Res).
+as_proplist(#result_packet{field_list=_Cols,rows=_Vals}) when _Cols =:= undefined, 
+							      _Vals =:= undefined ->
+    [];
+as_proplist(#result_packet{field_list=_Cols,rows=_Vals}) when is_list(_Cols), 
+								  _Vals =:= undefined ->
+    [];
+as_proplist(#result_packet{field_list=_Cols,rows=_Vals}) when is_list(_Cols), 
+								  _Vals =:= [] ->
+    [];
+as_proplist(Res = #result_packet{field_list=Cols,rows=Vals}) when is_list(Cols), 
+								  is_list(Vals) ->
+    FieldData = emysql_util:field_names(Res),
+    RowData = case lists:flatten(Vals) of
+		  [] ->
+		      array:to_list(array:new([erlang:length(FieldData)]));
+		  Data ->
+		      Data
+	      end,
+    emysql_util:dualmap(fun(A,B)->{A,B} end, FieldData, RowData).
 
 %% @spec as_record(Result, RecordName, Fields, Fun) -> Result
 %%      Result = #result_packet{}
@@ -52,19 +95,24 @@ field_names(Result) when is_record(Result, result_packet) ->
 %%  Res = emysql:execute(pool1, "select * from foo"),
 %%  Res:as_record(foo, record_info(fields, foo)).
 as_record(Result, RecordName, Fields, Fun) when is_record(Result, result_packet), is_atom(RecordName), is_list(Fields), is_function(Fun) ->
-    {Lookup, _} = lists:mapfoldl(
-        fun(#field{name=Name}, Acc) ->
-            {{binary_to_atom(Name, utf8), Acc}, Acc+1}
-        end, 1, Result#result_packet.field_list),
-    [begin
-        RecordData = [case proplists:get_value(Field, Lookup) of
-                undefined ->
-                    undefined;
-                Index ->
-                    lists:nth(Index, Row)
-        end || Field <- Fields],
-        Fun(list_to_tuple([RecordName | RecordData]))
-    end || Row <- Result#result_packet.rows].
+	Columns = Result#result_packet.field_list,
+
+	S = lists:seq(1, length(Columns)),
+	P = lists:zip([ binary_to_atom(C1#field.name, utf8) || C1 <- Columns ], S),
+	F = fun(FieldName) ->
+		case proplists:lookup(FieldName, P) of
+			none ->
+					fun(_) -> undefined end;
+			{FieldName, Pos} ->
+					fun(Row) -> lists:nth(Pos, Row) end
+		end
+	end,
+	Fs = [ F(FieldName) || FieldName <- Fields ],
+	F1 = fun(Row) ->
+		RecordData = [ Fx(Row) || Fx <- Fs ],
+		Fun(list_to_tuple([RecordName|RecordData]))
+	end,
+	[ F1(Row) || Row <- Result#result_packet.rows ].
 
 as_record(Result, RecordName, Fields) when is_record(Result, result_packet), is_atom(RecordName), is_list(Fields) ->
     as_record(Result, RecordName, Fields, fun(A) -> A end).
@@ -177,97 +225,51 @@ encode(Val) ->
 
 %% @doc Encode a value so that it can be included safely in a MySQL query.
 %% @spec encode(term(), list | binary) -> string() | binary() | {error, Error}
-encode(Val, ReturnType) when is_atom(Val) ->
-    encode(atom_to_list(Val), ReturnType, latin1); % todo: latin1?
-
-encode(Val, ReturnType) ->
-    encode(Val, ReturnType, latin1).
-
-encode(null, list, _) ->
+encode(null, list) ->
     "null";
-
-encode(undefined, list, _) ->
+encode(undefined, list) ->
     "null";
-
-encode(null, binary, _)  ->
+encode(null, binary)  ->
     <<"null">>;
-
-encode(undefined, binary, _)  ->
+encode(undefined, binary)  ->
     <<"null">>;
-
-encode(Val, list, latin1) when is_binary(Val) ->
+encode(Val, list) when is_binary(Val) ->
     quote(binary_to_list(Val));
-
-encode(Val, list, Encoding) when is_binary(Val) ->
-    quote(unicode:characters_to_list(Val, Encoding));
-
-encode(Val, binary, Encoding) when is_atom(Val) ->
-	encode(atom_to_list(Val), binary, Encoding);
-
-encode(Val, binary, latin1) when is_list(Val) ->
-	list_to_binary(quote(Val));
-
-encode(Val, binary, Encoding) when is_list(Val) ->
-    unicode:characters_to_binary(quote(Val), Encoding, Encoding);
-
-
-encode(Val, binary, latin1) when is_binary(Val) ->
-    %-% io:format("encode latin-1 in : ~s = ~w ~n", [Val, Val]),
-    X = list_to_binary(quote(binary_to_list(Val))),
-    %-% io:format("encode latin-1 out: ~s = ~w ~n", [X, X]),
-    X;
-
-encode(Val, binary, Encoding) when is_binary(Val) ->
-    case unicode:characters_to_list(Val,Encoding) of
-        {error,E1,E2} -> exit({invalid_utf8_binary, E1, E2});
-        {incomplete,E1,E2} -> exit({invalid_utf8_binary, E1, E2});
-        List ->
-            unicode:characters_to_binary(quote(List),Encoding,Encoding)
-    end;
-
-encode(Val, list, _) when is_list(Val) ->
-    %-% io:format("encode list in : ~s = ~w ~n", [Val, Val]),
-    %-% io:format("encode list out: ~s = ~w ~n", [quote(Val), quote(Val)]),
+encode(Val, binary) when is_atom(Val) ->
+    encode(atom_to_list(Val), binary);
+encode(Val, binary) when is_list(Val) -> 
+    list_to_binary(quote(Val));
+encode(Val, binary) when is_binary(Val) ->
+    list_to_binary(quote(binary_to_list(Val)));
+encode(Val, list) when is_list(Val) ->
     quote(Val);
-
-encode(Val, list, _) when is_integer(Val) ->
+encode(Val, list) when is_integer(Val) ->
     integer_to_list(Val);
-
-encode(Val, binary, _) when is_integer(Val) ->
+encode(Val, binary) when is_integer(Val) ->
     list_to_binary(integer_to_list(Val));
-
-encode(Val, list, _) when is_float(Val) ->
+encode(Val, list) when is_float(Val) ->
     [Res] = io_lib:format("~w", [Val]),
     Res;
-
-encode(Val, binary, _) when is_float(Val) ->
+encode(Val, binary) when is_float(Val) ->
     iolist_to_binary(io_lib:format("~w", [Val]));
-
-encode({datetime, Val}, ReturnType, Encoding) ->
-    encode(Val, ReturnType, Encoding);
-
-encode({date, Val}, ReturnType, Encoding) ->
-    encode(Val, ReturnType, Encoding);
-
-encode({time, Val}, ReturnType, Encoding) ->
-    encode(Val, ReturnType, Encoding);
-
-encode({{Year, Month, Day}, {Hour, Minute, Second}}, list, _) ->
+encode({datetime, Val}, ReturnType) ->
+    encode(Val, ReturnType);
+encode({date, Val}, ReturnType) ->
+    encode(Val, ReturnType);
+encode({time, Val}, ReturnType) ->
+    encode(Val, ReturnType);
+encode({{Year, Month, Day}, {Hour, Minute, Second}}, list) ->
     Res = io_lib:format("'~4.4.0w-~2.2.0w-~2.2.0w ~2.2.0w:~2.2.0w:~2.2.0w'",
                         [Year, Month, Day, Hour, Minute, Second]),
     lists:flatten(Res);
-
-encode({{_Year, _Month, _Day}, {_Hour, _Minute, _Second}}=Val, binary, E) ->
-    list_to_binary(encode(Val, list, E));
-
-encode({Time1, Time2, Time3}, list, _) ->
+encode({{_Year, _Month, _Day}, {_Hour, _Minute, _Second}}=Val, binary) ->
+    list_to_binary(encode(Val, list));
+encode({Time1, Time2, Time3}, list) ->
     Res = two_digits([Time1, Time2, Time3]),
     lists:flatten(Res);
-
-encode({_Time1, _Time2, _Time3}=Val, binary, E) ->
-    list_to_binary(encode(Val, list, E));
-
-encode(Val, _, _) ->
+encode({_Time1, _Time2, _Time3}=Val, binary) ->
+    list_to_binary(encode(Val, list));
+encode(Val, _) ->
     {error, {unrecognized_value, Val}}.
 
 %% @private
@@ -289,23 +291,6 @@ two_digits(Num) ->
 %% hd/11,12
 quote(String) when is_list(String) ->
     [39 | lists:reverse([39 | quote_loop(String)])]. %% 39 is $'
-
-quote(String, _) when is_list(String) ->
-    quote(String);
-
-quote(Any, Pool) when is_record(Any,pool) ->
-    quote(Any, Pool#pool.encoding);
-
-quote(Bin, latin1) when is_binary(Bin) ->
-    list_to_binary(quote(binary_to_list(Bin)));
-
-quote(Bin, Encoding) when is_binary(Bin) ->
-    case unicode:characters_to_list(Bin,Encoding) of
-        {error,E1,E2} -> exit({invalid_utf8_binary, E1, E2});
-        List ->
-            unicode:characters_to_binary(quote(List),Encoding,Encoding)
-    end.
-    % note:quote is a codepoint-wise inspection (each is a number) that also works for Unicode.
 
 %% @doc  Make MySQL-safe backslash escapes before 10, 13, \, 26, 34, 39.
 %% @spec quote_loop(list()) -> list()
@@ -350,28 +335,5 @@ quote_loop([C | Rest], Acc) ->
 %% can be used to determine if data can be interpreted as UTF-8.
 %% Source: http://www.erlang.org/doc/apps/stdlib/unicode_usage.html
 
-anybin_to_list(Bin) when is_binary(Bin) ->
-    case unicode:characters_to_binary(Bin,utf8,utf8) of
-        Bin -> unicode:characters_to_list(Bin);
-        _ -> binary_to_list(Bin)
-    end.
-
-any_to_binary(L) when is_binary(L) ->
-    L;
-any_to_binary(L) when is_list(L) ->
-    case unicode:characters_to_binary(L) of
-        {error,_,_} -> list_to_binary(L);
-        B -> case unicode:characters_to_list(B,utf8) of
-            L -> B;
-            _ -> list_to_binary(L)
-        end
-    end.
-
-to_binary(L,_) when is_binary(L) ->
-    L;
-
-to_binary(L,latin1) when is_list(L) ->
-    list_to_binary(L);
-
-to_binary(L,Encoding) when is_list(L) ->
-    unicode:characters_to_binary(L,Encoding,Encoding).
+to_binary(L) when is_binary(L) -> L;
+to_binary(L) when is_list(L)   -> list_to_binary(L).

@@ -6,6 +6,23 @@
 
 	git checkout origin/stable
 
+#### Jun 21 2013 hd | doc
+* Remove utf-8 encoding of binary data
+  *Rationale*: The user must ensure that data passed to the MySQL
+  connection is already encoded in the right utf-8 format. The socket
+  doesn't know about encoding. In turn, one can again send binary BLOB
+  data over the driver.
+* Fixes many small errors by merging two major Emysql branches
+
+#### Jun 21 2013 hd | doc
+* Fixed abuse of ETS table to store Mysql results
+* Fixed floating point encoding in the driver base
+* Support using atoms as prepared statements
+* Optimize the code path around SETing parameters
+* Fixed bug in receiving packet bodies which would lead to conn. stream corruption
+* Make it possible to use configurable TCP timeout values
+* Fix date encoding of special dates, e.g., year 1
+
 #### Apr 23 2013 hd | doc
 * Fixed issue #44: LOAD DATA INFILE. Thanks to Qing Liang / qingliangcn.  
 * Added samples and brief description of LOAD DATA INFILE  
