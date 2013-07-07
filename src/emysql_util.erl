@@ -26,7 +26,8 @@
 -module(emysql_util).
 -export([field_names/1, as_record/4, as_record/3, length_coded_binary/1, length_coded_string/1,
     null_terminated_string/2, asciz/1, bxor_binary/2, dualmap/3, hash/1, to_binary/1,
-    rnd/3, encode/1, encode/2, quote/1, as_proplist/1, as_dict/1, as_json/1]).
+    rnd/3, encode/1, encode/2, quote/1, as_proplist/1, as_dict/1, as_json/1,
+    named_parameters/1, map_parameters/2]).
 
 -include("emysql.hrl").
 
@@ -337,3 +338,50 @@ quote_loop([C | Rest], Acc) ->
 
 to_binary(L) when is_binary(L) -> L;
 to_binary(L) when is_list(L)   -> list_to_binary(L).
+
+
+
+named_parameters(Str) when is_binary(Str) ->
+    {ok, Query, Params} = named_parameters(binary_to_list(Str)),
+    {ok, list_to_binary(Query), [list_to_binary(P)  || P <- Params]};
+named_parameters(Str) when is_list(Str) ->
+    named_parse(Str, [], []).
+
+
+named_result(Out, Params) ->
+    {ok, lists:reverse(Out), lists:reverse(Params)}.
+
+named_parse([$: | T], Out, Params) ->
+    named_parse_param(T, [$? | Out], Params, []);
+named_parse([C | T], Out, Params) when C=:=$'; C=:=$"; C=:=$` ->
+    named_parse_skip(T, C, [C |Out], Params);
+named_parse([C | T], Out, Params) ->
+    named_parse(T, [C | Out], Params);
+named_parse([], Out, Params) ->
+    named_result(Out, Params).
+
+named_parse_param([C | T] = Str, Out, Params, Acc) ->
+    case is_param_char(C) of
+        true -> named_parse_param(T, Out, Params, [C | Acc]);
+        false -> named_parse(Str, Out, [lists:reverse(Acc)  |Params])
+    end;
+named_parse_param([], Out, Params, Acc) ->
+    named_result(Out, [lists:reverse(Acc)  |Params]).
+
+named_parse_skip([Delim | T], Delim, Out, Params) ->
+    named_parse(T, [Delim | Out], Params);
+named_parse_skip([$\\=C1, C2 | T], Delim, Out, Params) ->
+    named_parse_skip(T, Delim, [C1,C2 | Out], Params);
+named_parse_skip([C | T], Delim, Out, Params) ->
+    named_parse_skip(T, Delim, [C | Out], Params).
+
+is_param_char(C) when (C>=$a andalso C=<$z) orelse (C>=$A andalso C=<$Z) orelse (C=:=$_) -> true;
+is_param_char(_) -> false.
+
+
+%% %doc
+map_parameters(Args, Map) ->
+    [begin
+        {K, V} = lists:keyfind(K, 1, Args),
+        V
+    end || K <- Map].
